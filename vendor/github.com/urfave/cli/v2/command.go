@@ -41,8 +41,11 @@ type Command struct {
 	Flags []Flag
 	// Treat all flags as normal arguments if true
 	SkipFlagParsing bool
-	// Boolean to hide built-in help command
+	// Boolean to hide built-in help command and help flag
 	HideHelp bool
+	// Boolean to hide built-in help command but keep help flag
+	// Ignored if HideHelp is true.
+	HideHelpCommand bool
 	// Boolean to hide this command from help or completion
 	Hidden bool
 	// Boolean to enable short-option handling so user can combine several
@@ -102,39 +105,39 @@ func (c *Command) Run(ctx *Context) (err error) {
 
 	set, err := c.parseFlags(ctx.Args(), ctx.shellComplete)
 
-	context := NewContext(ctx.App, set, ctx)
-	context.Command = c
-	if checkCommandCompletions(context, c.Name) {
+	cCtx := NewContext(ctx.App, set, ctx)
+	cCtx.Command = c
+	if checkCommandCompletions(cCtx, c.Name) {
 		return nil
 	}
 
 	if err != nil {
 		if c.OnUsageError != nil {
-			err = c.OnUsageError(context, err, false)
-			context.App.handleExitCoder(context, err)
+			err = c.OnUsageError(cCtx, err, false)
+			cCtx.App.handleExitCoder(cCtx, err)
 			return err
 		}
-		_, _ = fmt.Fprintln(context.App.Writer, "Incorrect Usage:", err.Error())
-		_, _ = fmt.Fprintln(context.App.Writer)
-		_ = ShowCommandHelp(context, c.Name)
+		_, _ = fmt.Fprintln(cCtx.App.Writer, "Incorrect Usage:", err.Error())
+		_, _ = fmt.Fprintln(cCtx.App.Writer)
+		_ = ShowCommandHelp(cCtx, c.Name)
 		return err
 	}
 
-	if checkCommandHelp(context, c.Name) {
+	if checkCommandHelp(cCtx, c.Name) {
 		return nil
 	}
 
-	cerr := checkRequiredFlags(c.Flags, context)
+	cerr := cCtx.checkRequiredFlags(c.Flags)
 	if cerr != nil {
-		_ = ShowCommandHelp(context, c.Name)
+		_ = ShowCommandHelp(cCtx, c.Name)
 		return cerr
 	}
 
 	if c.After != nil {
 		defer func() {
-			afterErr := c.After(context)
+			afterErr := c.After(cCtx)
 			if afterErr != nil {
-				context.App.handleExitCoder(context, err)
+				cCtx.App.handleExitCoder(cCtx, err)
 				if err != nil {
 					err = newMultiError(err, afterErr)
 				} else {
@@ -145,10 +148,9 @@ func (c *Command) Run(ctx *Context) (err error) {
 	}
 
 	if c.Before != nil {
-		err = c.Before(context)
+		err = c.Before(cCtx)
 		if err != nil {
-			_ = ShowCommandHelp(context, c.Name)
-			context.App.handleExitCoder(context, err)
+			cCtx.App.handleExitCoder(cCtx, err)
 			return err
 		}
 	}
@@ -157,11 +159,11 @@ func (c *Command) Run(ctx *Context) (err error) {
 		c.Action = helpSubcommand.Action
 	}
 
-	context.Command = c
-	err = c.Action(context)
+	cCtx.Command = c
+	err = c.Action(cCtx)
 
 	if err != nil {
-		context.App.handleExitCoder(context, err)
+		cCtx.App.handleExitCoder(cCtx, err)
 	}
 	return err
 }
@@ -225,6 +227,7 @@ func (c *Command) startApp(ctx *Context) error {
 	}
 
 	app.Usage = c.Usage
+	app.UsageText = c.UsageText
 	app.Description = c.Description
 	app.ArgsUsage = c.ArgsUsage
 
@@ -236,10 +239,12 @@ func (c *Command) startApp(ctx *Context) error {
 	app.Commands = c.Subcommands
 	app.Flags = c.Flags
 	app.HideHelp = c.HideHelp
+	app.HideHelpCommand = c.HideHelpCommand
 
 	app.Version = ctx.App.Version
-	app.HideVersion = ctx.App.HideVersion
+	app.HideVersion = true
 	app.Compiled = ctx.App.Compiled
+	app.Reader = ctx.App.Reader
 	app.Writer = ctx.App.Writer
 	app.ErrWriter = ctx.App.ErrWriter
 	app.ExitErrHandler = ctx.App.ExitErrHandler

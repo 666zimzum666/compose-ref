@@ -18,6 +18,16 @@ func NewStringSlice(defaults ...string) *StringSlice {
 	return &StringSlice{slice: append([]string{}, defaults...)}
 }
 
+// clone allocate a copy of self object
+func (s *StringSlice) clone() *StringSlice {
+	n := &StringSlice{
+		slice:      make([]string, len(s.slice)),
+		hasBeenSet: s.hasBeenSet,
+	}
+	copy(n.slice, s.slice)
+	return n
+}
+
 // Set appends the string value to the list of values
 func (s *StringSlice) Set(value string) error {
 	if !s.hasBeenSet {
@@ -71,6 +81,7 @@ type StringSliceFlag struct {
 	Value       *StringSlice
 	DefaultText string
 	HasBeenSet  bool
+	Destination *StringSlice
 }
 
 // IsSet returns whether or not the flag has been set through env or file
@@ -81,12 +92,12 @@ func (f *StringSliceFlag) IsSet() bool {
 // String returns a readable representation of this value
 // (for usage defaults)
 func (f *StringSliceFlag) String() string {
-	return FlagStringer(f)
+	return withEnvHint(f.GetEnvVars(), stringifyStringSliceFlag(f))
 }
 
 // Names returns the names of the flag
 func (f *StringSliceFlag) Names() []string {
-	return flagNames(f)
+	return flagNames(f.Name, f.Aliases)
 }
 
 // IsRequired returns whether or not the flag is required
@@ -113,25 +124,63 @@ func (f *StringSliceFlag) GetValue() string {
 	return ""
 }
 
+// IsVisible returns true if the flag is not hidden, otherwise false
+func (f *StringSliceFlag) IsVisible() bool {
+	return !f.Hidden
+}
+
+// GetDefaultText returns the default text for this flag
+func (f *StringSliceFlag) GetDefaultText() string {
+	if f.DefaultText != "" {
+		return f.DefaultText
+	}
+	return f.GetValue()
+}
+
+// GetEnvVars returns the env vars for this flag
+func (f *StringSliceFlag) GetEnvVars() []string {
+	return f.EnvVars
+}
+
 // Apply populates the flag given the flag set and environment
 func (f *StringSliceFlag) Apply(set *flag.FlagSet) error {
+
+	if f.Destination != nil && f.Value != nil {
+		f.Destination.slice = make([]string, len(f.Value.slice))
+		copy(f.Destination.slice, f.Value.slice)
+
+	}
+
 	if val, ok := flagFromEnvOrFile(f.EnvVars, f.FilePath); ok {
-		f.Value = &StringSlice{}
+		if f.Value == nil {
+			f.Value = &StringSlice{}
+		}
+		destination := f.Value
+		if f.Destination != nil {
+			destination = f.Destination
+		}
 
 		for _, s := range strings.Split(val, ",") {
-			if err := f.Value.Set(strings.TrimSpace(s)); err != nil {
+			if err := destination.Set(strings.TrimSpace(s)); err != nil {
 				return fmt.Errorf("could not parse %q as string value for flag %s: %s", val, f.Name, err)
 			}
 		}
 
+		// Set this to false so that we reset the slice if we then set values from
+		// flags that have already been set by the environment.
+		destination.hasBeenSet = false
 		f.HasBeenSet = true
 	}
 
+	if f.Value == nil {
+		f.Value = &StringSlice{}
+	}
+	setValue := f.Destination
+	if f.Destination == nil {
+		setValue = f.Value.clone()
+	}
 	for _, name := range f.Names() {
-		if f.Value == nil {
-			f.Value = &StringSlice{}
-		}
-		set.Var(f.Value, name, f.Usage)
+		set.Var(setValue, name, f.Usage)
 	}
 
 	return nil
@@ -139,8 +188,8 @@ func (f *StringSliceFlag) Apply(set *flag.FlagSet) error {
 
 // StringSlice looks up the value of a local StringSliceFlag, returns
 // nil if not found
-func (c *Context) StringSlice(name string) []string {
-	if fs := lookupFlagSet(name, c); fs != nil {
+func (cCtx *Context) StringSlice(name string) []string {
+	if fs := cCtx.lookupFlagSet(name); fs != nil {
 		return lookupStringSlice(name, fs)
 	}
 	return nil
@@ -149,11 +198,9 @@ func (c *Context) StringSlice(name string) []string {
 func lookupStringSlice(name string, set *flag.FlagSet) []string {
 	f := set.Lookup(name)
 	if f != nil {
-		parsed, err := (f.Value.(*StringSlice)).Value(), error(nil)
-		if err != nil {
-			return nil
+		if slice, ok := f.Value.(*StringSlice); ok {
+			return slice.Value()
 		}
-		return parsed
 	}
 	return nil
 }

@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"errors"
 	"flag"
 	"fmt"
 	"io/ioutil"
@@ -36,7 +37,7 @@ var VersionFlag Flag = &BoolFlag{
 
 // HelpFlag prints the help for all commands and subcommands.
 // Set to nil to disable the flag.  The subcommand
-// will still be added unless HideHelp is set to true.
+// will still be added unless HideHelp or HideHelpCommand is set to true.
 var HelpFlag Flag = &BoolFlag{
 	Name:    "help",
 	Aliases: []string{"h"},
@@ -116,6 +117,20 @@ type DocGenerationFlag interface {
 	// GetValue returns the flags value as string representation and an empty
 	// string if the flag takes no value at all.
 	GetValue() string
+
+	// GetDefaultText returns the default text for this flag
+	GetDefaultText() string
+
+	// GetEnvVars returns the env vars for this flag
+	GetEnvVars() []string
+}
+
+// VisibleFlag is an interface that allows to check if a flag is visible
+type VisibleFlag interface {
+	Flag
+
+	// IsVisible returns true if the flag is not hidden, otherwise false
+	IsVisible() bool
 }
 
 func flagSet(name string, flags []Flag) (*flag.FlagSet, error) {
@@ -130,11 +145,52 @@ func flagSet(name string, flags []Flag) (*flag.FlagSet, error) {
 	return set, nil
 }
 
+func copyFlag(name string, ff *flag.Flag, set *flag.FlagSet) {
+	switch ff.Value.(type) {
+	case Serializer:
+		_ = set.Set(name, ff.Value.(Serializer).Serialize())
+	default:
+		_ = set.Set(name, ff.Value.String())
+	}
+}
+
+func normalizeFlags(flags []Flag, set *flag.FlagSet) error {
+	visited := make(map[string]bool)
+	set.Visit(func(f *flag.Flag) {
+		visited[f.Name] = true
+	})
+	for _, f := range flags {
+		parts := f.Names()
+		if len(parts) == 1 {
+			continue
+		}
+		var ff *flag.Flag
+		for _, name := range parts {
+			name = strings.Trim(name, " ")
+			if visited[name] {
+				if ff != nil {
+					return errors.New("Cannot use two forms of the same flag: " + name + " " + ff.Name)
+				}
+				ff = set.Lookup(name)
+			}
+		}
+		if ff == nil {
+			continue
+		}
+		for _, name := range parts {
+			name = strings.Trim(name, " ")
+			if !visited[name] {
+				copyFlag(name, ff, set)
+			}
+		}
+	}
+	return nil
+}
+
 func visibleFlags(fl []Flag) []Flag {
 	var visible []Flag
 	for _, f := range fl {
-		field := flagValue(f).FieldByName("Hidden")
-		if !field.IsValid() || !field.Bool() {
+		if vf, ok := f.(VisibleFlag); ok && vf.IsVisible() {
 			visible = append(visible, f)
 		}
 	}
@@ -203,11 +259,8 @@ func withEnvHint(envVars []string, str string) string {
 	return str + envText
 }
 
-func flagNames(f Flag) []string {
+func flagNames(name string, aliases []string) []string {
 	var ret []string
-
-	name := flagStringField(f, "Name")
-	aliases := flagStringSliceField(f, "Aliases")
 
 	for _, part := range append([]string{name}, aliases...) {
 		// v1 -> v2 migration warning zone:
@@ -231,17 +284,6 @@ func flagStringSliceField(f Flag, name string) []string {
 	return []string{}
 }
 
-func flagStringField(f Flag, name string) string {
-	fv := flagValue(f)
-	field := fv.FieldByName(name)
-
-	if field.IsValid() {
-		return field.String()
-	}
-
-	return ""
-}
-
 func withFileHint(filePath, str string) string {
 	fileText := ""
 	if filePath != "" {
@@ -258,56 +300,34 @@ func flagValue(f Flag) reflect.Value {
 	return fv
 }
 
+func formatDefault(format string) string {
+	return " (default: " + format + ")"
+}
+
 func stringifyFlag(f Flag) string {
-	fv := flagValue(f)
-
-	switch f.(type) {
-	case *IntSliceFlag:
-		return withEnvHint(flagStringSliceField(f, "EnvVars"),
-			stringifyIntSliceFlag(f.(*IntSliceFlag)))
-	case *Int64SliceFlag:
-		return withEnvHint(flagStringSliceField(f, "EnvVars"),
-			stringifyInt64SliceFlag(f.(*Int64SliceFlag)))
-	case *Float64SliceFlag:
-		return withEnvHint(flagStringSliceField(f, "EnvVars"),
-			stringifyFloat64SliceFlag(f.(*Float64SliceFlag)))
-	case *StringSliceFlag:
-		return withEnvHint(flagStringSliceField(f, "EnvVars"),
-			stringifyStringSliceFlag(f.(*StringSliceFlag)))
+	// enforce DocGeneration interface on flags to avoid reflection
+	df, ok := f.(DocGenerationFlag)
+	if !ok {
+		return ""
 	}
 
-	placeholder, usage := unquoteUsage(fv.FieldByName("Usage").String())
-
-	needsPlaceholder := false
-	defaultValueString := ""
-	val := fv.FieldByName("Value")
-	if val.IsValid() {
-		needsPlaceholder = val.Kind() != reflect.Bool
-		defaultValueString = fmt.Sprintf(" (default: %v)", val.Interface())
-
-		if val.Kind() == reflect.String && val.String() != "" {
-			defaultValueString = fmt.Sprintf(" (default: %q)", val.String())
-		}
-	}
-
-	helpText := fv.FieldByName("DefaultText")
-	if helpText.IsValid() && helpText.String() != "" {
-		needsPlaceholder = val.Kind() != reflect.Bool
-		defaultValueString = fmt.Sprintf(" (default: %s)", helpText.String())
-	}
-
-	if defaultValueString == " (default: )" {
-		defaultValueString = ""
-	}
+	placeholder, usage := unquoteUsage(df.GetUsage())
+	needsPlaceholder := df.TakesValue()
 
 	if needsPlaceholder && placeholder == "" {
 		placeholder = defaultPlaceholder
 	}
 
+	defaultValueString := ""
+
+	if s := df.GetDefaultText(); s != "" {
+		defaultValueString = fmt.Sprintf(formatDefault("%s"), s)
+	}
+
 	usageWithDefault := strings.TrimSpace(usage + defaultValueString)
 
-	return withEnvHint(flagStringSliceField(f, "EnvVars"),
-		fmt.Sprintf("%s\t%s", prefixedNames(f.Names(), placeholder), usageWithDefault))
+	return withEnvHint(df.GetEnvVars(),
+		fmt.Sprintf("%s\t%s", prefixedNames(df.Names(), placeholder), usageWithDefault))
 }
 
 func stringifyIntSliceFlag(f *IntSliceFlag) string {
@@ -365,11 +385,15 @@ func stringifySliceFlag(usage string, names, defaultVals []string) string {
 
 	defaultVal := ""
 	if len(defaultVals) > 0 {
-		defaultVal = fmt.Sprintf(" (default: %s)", strings.Join(defaultVals, ", "))
+		defaultVal = fmt.Sprintf(formatDefault("%s"), strings.Join(defaultVals, ", "))
 	}
 
 	usageWithDefault := strings.TrimSpace(fmt.Sprintf("%s%s", usage, defaultVal))
-	return fmt.Sprintf("%s\t%s", prefixedNames(names, placeholder), usageWithDefault)
+	multiInputString := "(accepts multiple inputs)"
+	if usageWithDefault != "" {
+		multiInputString = "\t" + multiInputString
+	}
+	return fmt.Sprintf("%s\t%s%s", prefixedNames(names, placeholder), usageWithDefault, multiInputString)
 }
 
 func hasFlag(flags []Flag, fl Flag) bool {
@@ -390,8 +414,10 @@ func flagFromEnvOrFile(envVars []string, filePath string) (val string, ok bool) 
 		}
 	}
 	for _, fileVar := range strings.Split(filePath, ",") {
-		if data, err := ioutil.ReadFile(fileVar); err == nil {
-			return string(data), true
+		if fileVar != "" {
+			if data, err := ioutil.ReadFile(fileVar); err == nil {
+				return string(data), true
+			}
 		}
 	}
 	return "", false
