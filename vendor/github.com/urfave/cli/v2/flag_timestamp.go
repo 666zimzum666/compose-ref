@@ -71,6 +71,7 @@ type TimestampFlag struct {
 	Value       *Timestamp
 	DefaultText string
 	HasBeenSet  bool
+	Destination *Timestamp
 }
 
 // IsSet returns whether or not the flag has been set through env or file
@@ -86,7 +87,7 @@ func (f *TimestampFlag) String() string {
 
 // Names returns the names of the flag
 func (f *TimestampFlag) Names() []string {
-	return flagNames(f)
+	return flagNames(f.Name, f.Aliases)
 }
 
 // IsRequired returns whether or not the flag is required
@@ -113,13 +114,37 @@ func (f *TimestampFlag) GetValue() string {
 	return ""
 }
 
+// IsVisible returns true if the flag is not hidden, otherwise false
+func (f *TimestampFlag) IsVisible() bool {
+	return !f.Hidden
+}
+
+// GetDefaultText returns the default text for this flag
+func (f *TimestampFlag) GetDefaultText() string {
+	if f.DefaultText != "" {
+		return f.DefaultText
+	}
+	return f.GetValue()
+}
+
+// GetEnvVars returns the env vars for this flag
+func (f *TimestampFlag) GetEnvVars() []string {
+	return f.EnvVars
+}
+
 // Apply populates the flag given the flag set and environment
 func (f *TimestampFlag) Apply(set *flag.FlagSet) error {
 	if f.Layout == "" {
 		return fmt.Errorf("timestamp Layout is required")
 	}
-	f.Value = &Timestamp{}
+	if f.Value == nil {
+		f.Value = &Timestamp{}
+	}
 	f.Value.SetLayout(f.Layout)
+
+	if f.Destination != nil {
+		f.Destination.SetLayout(f.Layout)
+	}
 
 	if val, ok := flagFromEnvOrFile(f.EnvVars, f.FilePath); ok {
 		if err := f.Value.Set(val); err != nil {
@@ -129,14 +154,19 @@ func (f *TimestampFlag) Apply(set *flag.FlagSet) error {
 	}
 
 	for _, name := range f.Names() {
+		if f.Destination != nil {
+			set.Var(f.Destination, name, f.Usage)
+			continue
+		}
+
 		set.Var(f.Value, name, f.Usage)
 	}
 	return nil
 }
 
 // Timestamp gets the timestamp from a flag name
-func (c *Context) Timestamp(name string) *time.Time {
-	if fs := lookupFlagSet(name, c); fs != nil {
+func (cCtx *Context) Timestamp(name string) *time.Time {
+	if fs := cCtx.lookupFlagSet(name); fs != nil {
 		return lookupTimestamp(name, fs)
 	}
 	return nil
